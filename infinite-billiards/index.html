@@ -54,8 +54,7 @@ const rnd = (a,b)=>a+Math.random()*(b-a);
 function mkBall(x,y,white,g){
   return {x,y,vx:0,vy:0,g:g||1,cd:0,white:!!white};
 }
-function setupTable(){
-  balls = []; fx = []; turnScore = 0;
+function addRack(){
   const rows = [1,2,3];
   const cx = (L+R)/2 + rnd(-30,30), top = T + 90 + rnd(-10,20);
   for(let r=0;r<rows.length;r++){
@@ -64,15 +63,34 @@ function setupTable(){
       balls.push(mkBall(x, top + r*(BR*2), false, 1));
     }
   }
-  cueBall = mkBall((L+R)/2 + rnd(-60,60), B - 80, true, 1);
+}
+function placeCue(){
+  let x=(L+R)/2, y=B-80;
+  for(let k=0;k<60;k++){
+    if(!balls.some(b=>Math.hypot(b.x-x,b.y-y)<BR*2.2)) break;
+    x = rnd(L+BR*2,R-BR*2); y = rnd(B-200,B-BR*2);
+  }
+  cueBall = mkBall(x,y,true,1);
   balls.push(cueBall);
+}
+function setupTable(){
+  balls = []; fx = []; turnScore = 0;
+  addRack(); placeCue();
+}
+// 盤面はリセットせず次のターンへ持ち越す
+function nextTurnTable(){
+  fx = []; turnScore = 0;
+  for(const b of balls) b.vx=b.vy=0;
+  if(!balls.includes(cueBall)) placeCue();
+  if(balls.length<=1) addRack();
 }
 
 function startGame(){
   score=0; round=1; newRecord=false; startTurn();
 }
 function startTurn(){
-  setupTable(); pull = null; drag = null;
+  if(round===1) setupTable(); else nextTurnTable();
+  pull = null; drag = null;
   state='aim';
 }
 function endTurn(){
@@ -101,7 +119,7 @@ function shoot(dirx, diry, power){
 function spawnClone(a, nx, ny){
   const side = Math.random()<0.5 ? -1 : 1;
   const ang = side*rnd(0.25,0.6), c=Math.cos(ang), s=Math.sin(ang);
-  const b = mkBall(a.x - ny*side*BR*1.5, a.y + nx*side*BR*1.5, a.white, a.g);
+  const b = mkBall(a.x - ny*side*BR*1.5, a.y + nx*side*BR*1.5, false, a.g);
   b.x = Math.min(R-BR, Math.max(L+BR, b.x)); b.y = Math.min(B-BR, Math.max(T+BR, b.y));
   b.vx = a.vx*c - a.vy*s; b.vy = a.vx*s + a.vy*c;
   b.cd = 0.15;
