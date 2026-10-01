@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>引っ張りビリヤード</title>
+<style>
+  :root{color-scheme:dark;--bg:#0d1218;--panel:#1a2430;--fg:#eaf0f6;--mut:#8fa0b5;--acc:#ffd24a}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{display:block;touch-action:none;background:#0a3a28}
+  .overlay{position:fixed;inset:0;background:rgba(8,12,18,.88);display:flex;align-items:center;justify-content:center;padding:16px;overflow:auto}
+  .overlay.hidden{display:none}
+  .card{background:var(--panel);border-radius:16px;padding:24px;max-width:420px;width:100%;box-shadow:0 10px 40px #0008}
+  h1{margin:0 0 6px;font-size:26px}
+  p{color:var(--mut);font-size:14px;line-height:1.6;margin:0 0 14px}
+  .opt{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:8px 0}
+  select{background:#0f1620;color:var(--fg);border:1px solid #ffffff30;border-radius:8px;padding:10px;font-size:15px;width:150px}
+  button{background:var(--acc);color:#222;border:0;border-radius:10px;padding:14px 24px;font-size:17px;font-weight:700;cursor:pointer;margin-top:14px;width:100%}
+  button.sec{background:#ffffff1c;color:var(--fg);margin-top:8px}
+  .big{font-size:40px;font-weight:800;margin:4px 0 10px}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+
+<div id="menu" class="overlay">
+  <div class="card">
+    <h1>🎱 引っ張りビリヤード</h1>
+    <p>ターンなし。白いボールを引っ張って離すと、反対方向へ飛びます。数字のボールを先に5個ポケットに入れたほうが勝ち。相手の白玉にぶつけて邪魔もできます。</p>
+    <div class="opt"><span>CPUの強さ</span>
+      <select id="level"><option value="easy">弱い</option><option value="normal" selected>普通</option><option value="hard">強い</option></select></div>
+    <p style="margin-top:10px">自分の白玉は青い輪、CPUの白玉は赤い輪。引っ張っている間はスローになります。白玉が落ちると少し後に戻ります。</p>
+    <button id="start">スタート</button>
+  </div>
+</div>
+
+<div id="result" class="overlay hidden">
+  <div class="card" style="text-align:center">
+    <div class="big" id="rtitle"></div>
+    <p id="rscore" style="font-size:18px"></p>
+    <button id="again">もう一度</button><button id="tomenu" class="sec">メニューへ</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+const W = 720, H = 1280, S = 1.5;
+const L = 40, RT = 680, T = 120, B = 1240, MIDY = (T + B) / 2;
+const R = 18, CATCH = 30, POCKET_DRAW = 34, WIN = 5, MAXV = 1500, FRICTION = 1.3, CD = .3;
+const POCKETS = [[L, T], [RT, T], [L, MIDY], [RT, MIDY], [L, B], [RT, B]];
+const HOME = [[360, 1050], [360, 310]];
+const BCOL = ["", "#f2c500", "#1c5bd6", "#e03a2a", "#6a2fb0", "#f07a10", "#1f9a45", "#8b1f1f", "#1a1a1a", "#f2c500"];
+const AI = { easy: { err: .07, gap: 2.2, slow: 90 }, normal: { err: .028, gap: 1.4, slow: 140 }, hard: { err: .008, gap: .85, slow: 220 } };
+const ME = 0, CPU = 1;
+
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+cv.width = W * S; cv.height = H * S;
+let balls = [], game = null, lastT = 0, drag = null, level = "normal";
+let actx = null;
+function beep(f, d, v, type) {
+  if (!actx) return;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || "sine"; o.frequency.value = f;
+  g.gain.setValueAtTime(Math.min(v, .3), actx.currentTime);
+  g.gain.exponentialRampToValueAtTime(.001, actx.currentTime + d);
+  o.connect(g); g.connect(actx.destination); o.start(); o.stop(actx.currentTime + d);
+}
+
+function mk(num, x, y, side) {
+  return { num, side, x, y, vx: 0, vy: 0, owner: null, fall: 0, fx: 0, fy: 0, respawn: 0, cd: 0, flash: 0, aiT: 1 };
+}
+function newGame() {
+  balls = [mk(0, HOME[0][0], HOME[0][1], ME), mk(0, HOME[1][0], HOME[1][1], CPU)];
+  const rows = [[5], [1, 9], [2, 8, 3], [7, 4], [6]];
+  const cx = 360, cy = (T + B) / 2, dx = R * 2 + 1, dy = R * 1.75 + 1;
+  rows.forEach((row, ri) => row.forEach((n, ci) => {
+    balls.push(mk(n, cx + (ci - (row.length - 1) / 2) * dx, cy + (ri - 2) * dy * 1.15, null));
+  }));
+  game = { state: "play", score: [0, 0], pocketed: [[], []], time: 0, over: false };
+}
+function start() {
+  level = document.getElementById("level").value;
+  newGame();
+  document.getElementById("menu").classList.add("hidden");
+  document.getElementById("result").classList.add("hidden");
+  if (!actx) try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  if (actx && actx.state === "suspended") actx.resume();
+}
+
+// ---- input (pull to shoot) ----
+function pt(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+}
+cv.addEventListener("pointerdown", e => {
+  if (!game || game.over) return;
+  const p = pt(e); drag = { x0: p.x, y0: p.y, x: p.x, y: p.y, id: e.pointerId };
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener("pointermove", e => {
+  if (!drag || drag.id !== e.pointerId) return;
+  const p = pt(e); drag.x = p.x; drag.y = p.y;
+});
+function release(e) {
+  if (!drag || drag.id !== e.pointerId) return;
+  const v = pull();
+  drag = null;
+  if (v && game && !game.over) shoot(balls[0], v.ang, v.power);
+}
+cv.addEventListener("pointerup", release);
+cv.addEventListener("pointercancel", () => { drag = null; });
+function pull() {
+  if (!drag) return null;
+  const dx = drag.x - drag.x0, dy = drag.y - drag.y0, len = Math.hypot(dx, dy);
+  if (len < 18) return null;
+  return { ang: Math.atan2(-dy, -dx), power: Math.min(1, (len - 10) / 220), len: Math.min(len, 230), dx, dy };
+}
+function shoot(b, ang, power) {
+  if (b.fall > 0 || b.respawn > 0 || b.cd > 0) return false;
+  power = Math.max(.12, Math.min(1, power));
+  b.vx += Math.cos(ang) * MAXV * power; b.vy += Math.sin(ang) * MAXV * power;
+  const sp = Math.hypot(b.vx, b.vy); if (sp > MAXV) { b.vx *= MAXV / sp; b.vy *= MAXV / sp; }
+  b.cd = CD; b.flash = .25;
+  beep(200 + 300 * power, .08, .12, "triangle");
+  return true;
+}
+
+// ---- physics ----
+function free(x, y, skip) {
+  if (x < L + R || x > RT - R || y < T + R || y > B - R) return false;
+  for (const o of balls) if (o !== skip && o.fall <= 0 && o.respawn <= 0 && Math.hypot(o.x - x, o.y - y) < 2 * R + 2) return false;
+  return true;
+}
+function place(b, hx, hy) {
+  for (let r = 0; r < 300; r += 12) for (let a = 0; a < 6.3; a += .6) {
+    const x = hx + Math.cos(a) * r, y = hy + Math.sin(a) * r;
+    if (free(x, y, b)) { b.x = x; b.y = y; b.vx = b.vy = 0; return; }
+  }
+  b.x = hx; b.y = hy; b.vx = b.vy = 0;
+}
+function pocketed(b) {
+  if (b.num === 0) { b.respawn = 1.3; b.fall = 0; beep(110, .3, .15); return; }
+  const o = b.owner;
+  b.gone = true; b.fall = 0;
+  if (o === null) { b.gone = false; b.respawn = 1; return; }
+  game.score[o]++; game.pocketed[o].push(b.num);
+  beep(o === ME ? 880 : 520, .25, .15, "triangle");
+  const left = balls.filter(x => x.num && !x.gone).length;
+  if (game.score[o] >= WIN || left === 0) endGame();
+}
+function endGame() {
+  game.over = true;
+  const [a, b] = game.score;
+  setTimeout(() => {
+    document.getElementById("rtitle").textContent = a > b ? "🏆 勝ち！" : a < b ? "負け…" : "引き分け";
+    document.getElementById("rscore").textContent = `あなた ${a} − ${b} CPU`;
+    document.getElementById("result").classList.remove("hidden");
+  }, 900);
+}
+function step(dt) {
+  const live = balls.filter(b => !b.gone);
+  for (const b of live) {
+    if (b.respawn > 0) {
+      b.respawn -= dt;
+      if (b.respawn <= 0) { if (b.num === 0) place(b, HOME[b.side][0], HOME[b.side][1]); else place(b, 360, MIDY); }
+      continue;
+    }
+    if (b.fall > 0) { b.fall -= dt; if (b.fall <= 0) pocketed(b); continue; }
+    const f = Math.exp(-FRICTION * dt); b.vx *= f; b.vy *= f;
+    if (Math.hypot(b.vx, b.vy) < 5) b.vx = b.vy = 0;
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    if (b.x < L + R) { b.x = L + R; b.vx = Math.abs(b.vx) * .88; }
+    if (b.x > RT - R) { b.x = RT - R; b.vx = -Math.abs(b.vx) * .88; }
+    if (b.y < T + R) { b.y = T + R; b.vy = Math.abs(b.vy) * .88; }
+    if (b.y > B - R) { b.y = B - R; b.vy = -Math.abs(b.vy) * .88; }
+    for (const [px, py] of POCKETS) if (Math.hypot(b.x - px, b.y - py) < CATCH) {
+      b.fall = .3; b.fx = px; b.fy = py; b.vx = b.vy = 0; break;
+    }
+  }
+  const act = live.filter(b => b.fall <= 0 && b.respawn <= 0);
+  for (let i = 0; i < act.length; i++) for (let j = i + 1; j < act.length; j++) {
+    const a = act[i], b = act[j];
+    let dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy);
+    if (d < 2 * R && d > 0) {
+      dx /= d; dy /= d; const o = (2 * R - d) / 2;
+      a.x -= dx * o; a.y -= dy * o; b.x += dx * o; b.y += dy * o;
+      const rv = (b.vx - a.vx) * dx + (b.vy - a.vy) * dy;
+      if (rv < 0) {
+        const sa = Math.hypot(a.vx, a.vy), sb = Math.hypot(b.vx, b.vy);
+        const imp = -(1 + .96) * rv / 2;
+        a.vx -= imp * dx; a.vy -= imp * dy; b.vx += imp * dx; b.vy += imp * dy;
+        // credit: a white claims what it touches; a faster owned ball passes credit on
+        if (a.num === 0 && b.num) b.owner = a.side;
+        else if (b.num === 0 && a.num) a.owner = b.side;
+        else if (a.num && b.num) { if (sa >= sb && a.owner !== null) b.owner = a.owner; else if (sb > sa && b.owner !== null) a.owner = b.owner; }
+        if (-rv > 40) beep(380 + Math.random() * 120, .06, Math.min(.25, -rv / 2000), "sine");
+      }
+    }
+  }
+}
+
+// ---- CPU ----
+function segDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy || 1;
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2));
+  return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
+}
+function cpuPlan(cue) {
+  const targets = balls.filter(b => b.num && !b.gone && b.fall <= 0 && b.respawn <= 0);
+  let best = null;
+  for (const b of targets) for (const [px, py] of POCKETS) {
+    let ux = px - b.x, uy = py - b.y; const d2 = Math.hypot(ux, uy); ux /= d2; uy /= d2;
+    const gx = b.x - ux * 2 * R, gy = b.y - uy * 2 * R;
+    if (gx < L + R || gx > RT - R || gy < T + R || gy > B - R) continue;
+    const cx = gx - cue.x, cy = gy - cue.y, d1 = Math.hypot(cx, cy);
+    if (d1 < 1) continue;
+    const cos = (cx * ux + cy * uy) / d1;
+    if (cos < .4) continue;
+    let blocked = false;
+    for (const o of balls) {
+      if (o === b || o === cue || o.gone || o.fall > 0 || o.respawn > 0) continue;
+      if (segDist(o.x, o.y, cue.x, cue.y, gx, gy) < 2 * R - 1 || segDist(o.x, o.y, b.x, b.y, px, py) < 2 * R - 1) { blocked = true; break; }
+    }
+    if (blocked) continue;
+    const score = d1 * .6 + d2 * .5 + (1 - cos) * 500 + (b.owner === CPU ? 0 : 0);
+    if (!best || score < best.score) best = { score, ang: Math.atan2(cy, cx), d1, d2 };
+  }
+  if (best) {
+    const v = (best.d1 + best.d2 * 1.25) * FRICTION + 180;
+    return { ang: best.ang, power: Math.max(.3, Math.min(1, v / MAXV)) };
+  }
+  let near = null, nd = 1e9;
+  for (const b of targets) { const d = Math.hypot(b.x - cue.x, b.y - cue.y); if (d < nd) { nd = d; near = b; } }
+  if (!near) return null;
+  return { ang: Math.atan2(near.y - cue.y, near.x - cue.x), power: Math.max(.3, Math.min(.8, nd * 1.6 / MAXV + .2)) };
+}
+function cpuThink(dt) {
+  const cue = balls[1], lv = AI[level];
+  cue.aiT -= dt;
+  if (cue.aiT > 0 || cue.cd > 0 || cue.fall > 0 || cue.respawn > 0) return;
+  if (Math.hypot(cue.vx, cue.vy) > lv.slow) return;
+  const plan = cpuPlan(cue); if (!plan) return;
+  const err = (Math.random() + Math.random() - 1) * lv.err * 2;
+  shoot(cue, plan.ang + err, plan.power * (.95 + Math.random() * .1));
+  cue.aiT = lv.gap * (.7 + Math.random() * .6);
+}
+
+// ---- update ----
+function update(dt) {
+  if (!game || game.over) { if (game) for (let i = 0; i < 2; i++) step(dt / 2); return; }
+  const slow = drag && pull() ? .25 : 1;
+  dt *= slow;
+  game.time += dt;
+  for (const b of balls) { b.cd = Math.max(0, b.cd - dt); b.flash = Math.max(0, b.flash - dt); }
+  cpuThink(dt);
+  for (let i = 0; i < 4; i++) step(dt / 4);
+}
+
+// ---- render ----
+function drawBall(b) {
+  let x = b.x, y = b.y, r = R, a = 1;
+  if (b.fall > 0) { const t = Math.max(0, b.fall / .3); x = b.fx + (b.x - b.fx) * t; y = b.fy + (b.y - b.fy) * t; r = R * t; }
+  if (b.respawn > 0) return;
+  if (r < 3) return;
+  ctx.globalAlpha = a;
+  ctx.fillStyle = "#0005"; ctx.beginPath(); ctx.arc(x + 3, y + 4, r, 0, 7); ctx.fill();
+  const base = b.num === 0 ? "#f6f6f2" : (b.num === 9 ? "#f6f6f2" : BCOL[b.num]);
+  const gr = ctx.createRadialGradient(x - r * .35, y - r * .35, 1, x, y, r);
+  gr.addColorStop(0, "#fff"); gr.addColorStop(.3, base); gr.addColorStop(1, b.num === 0 || b.num === 9 ? "#b8b8b0" : "#000b");
+  ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+  if (b.num === 9) { ctx.save(); ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.clip(); ctx.fillStyle = BCOL[9]; ctx.fillRect(x - r, y - r * .55, r * 2, r * 1.1); ctx.restore(); }
+  if (b.num) {
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(x, y, r * .5, 0, 7); ctx.fill();
+    ctx.fillStyle = "#111"; ctx.font = `bold ${r * .75}px sans-serif`; ctx.textAlign = "center"; ctx.fillText(b.num, x, y + r * .27);
+  } else {
+    ctx.strokeStyle = b.side === ME ? "#3da0ff" : "#ff5a5a"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(x, y, r - 1.5, 0, 7); ctx.stroke();
+    if (b.cd > 0 && b.side === ME) {
+      ctx.strokeStyle = "#fff8"; ctx.beginPath(); ctx.arc(x, y, r + 6, -Math.PI / 2, -Math.PI / 2 + (1 - b.cd / CD) * 6.283); ctx.stroke();
+    }
+  }
+  if (b.flash > 0) { ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, R + (.25 - b.flash) * 100, 0, 7); ctx.stroke(); }
+}
+function rayHit(b, ang) {
+  const dx = Math.cos(ang), dy = Math.sin(ang);
+  let t = 1e9, hit = null;
+  for (const o of balls) {
+    if (o === b || o.gone || o.fall > 0 || o.respawn > 0) continue;
+    const ox = o.x - b.x, oy = o.y - b.y, pr = ox * dx + oy * dy;
+    if (pr < 0) continue;
+    const pd2 = ox * ox + oy * oy - pr * pr;
+    if (pd2 > 4 * R * R) continue;
+    const tt = pr - Math.sqrt(4 * R * R - pd2);
+    if (tt < t) { t = tt; hit = o; }
+  }
+  const tx = dx > 0 ? (RT - R - b.x) / dx : dx < 0 ? (L + R - b.x) / dx : 1e9;
+  const ty = dy > 0 ? (B - R - b.y) / dy : dy < 0 ? (T + R - b.y) / dy : 1e9;
+  const tw = Math.min(tx, ty);
+  if (tw < t) { t = tw; hit = null; }
+  return { t, hit, dx, dy };
+}
+function render() {
+  ctx.setTransform(S, 0, 0, S, 0, 0);
+  ctx.fillStyle = "#3d2411"; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(W / 2, H / 2, 80, W / 2, H / 2, 800);
+  g.addColorStop(0, "#1d8c5c"); g.addColorStop(1, "#0b5a3a");
+  ctx.fillStyle = g; ctx.fillRect(L, T, RT - L, B - T);
+  ctx.strokeStyle = "#24130a"; ctx.lineWidth = 6; ctx.strokeRect(L, T, RT - L, B - T);
+  ctx.strokeStyle = "#ffffff22"; ctx.lineWidth = 2; ctx.setLineDash([10, 10]);
+  ctx.beginPath(); ctx.moveTo(L, MIDY); ctx.lineTo(RT, MIDY); ctx.stroke(); ctx.setLineDash([]);
+  for (const [x, y] of POCKETS) { ctx.fillStyle = "#050505"; ctx.beginPath(); ctx.arc(x, y, POCKET_DRAW, 0, 7); ctx.fill(); }
+  if (!game) return;
+  // aim guide
+  const me = balls[0], pl = pull();
+  if (pl && me.respawn <= 0 && me.fall <= 0) {
+    const ang = pl.ang, rh = rayHit(me, ang);
+    ctx.strokeStyle = "#fffd"; ctx.lineWidth = 3; ctx.setLineDash([4, 10]); ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(me.x, me.y); ctx.lineTo(me.x + rh.dx * rh.t, me.y + rh.dy * rh.t); ctx.stroke(); ctx.setLineDash([]);
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(me.x + rh.dx * rh.t, me.y + rh.dy * rh.t, R, 0, 7); ctx.stroke();
+    if (rh.hit) {
+      const cx = me.x + rh.dx * rh.t, cy = me.y + rh.dy * rh.t;
+      const nx = rh.hit.x - cx, ny = rh.hit.y - cy, nl = Math.hypot(nx, ny) || 1;
+      ctx.strokeStyle = "#ffd24a"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(rh.hit.x, rh.hit.y); ctx.lineTo(rh.hit.x + nx / nl * 120, rh.hit.y + ny / nl * 120); ctx.stroke();
+    }
+    // pull band
+    const bx = me.x - Math.cos(ang) * pl.len * .8, by = me.y - Math.sin(ang) * pl.len * .8;
+    ctx.strokeStyle = `hsl(${120 - pl.power * 120},90%,58%)`; ctx.lineWidth = 8;
+    ctx.beginPath(); ctx.moveTo(me.x, me.y); ctx.lineTo(bx, by); ctx.stroke();
+    ctx.fillStyle = ctx.strokeStyle; ctx.beginPath(); ctx.arc(bx, by, 10, 0, 7); ctx.fill();
+    ctx.lineCap = "butt";
+  }
+  balls.forEach(b => { if (!b.gone) drawBall(b); });
+  drawHUD();
+}
+function drawHUD() {
+  ctx.fillStyle = "#1b0f07"; ctx.fillRect(0, 0, W, T - 14);
+  ctx.textAlign = "left"; ctx.fillStyle = "#3da0ff"; ctx.font = "bold 26px sans-serif"; ctx.fillText("あなた", 24, 40);
+  ctx.textAlign = "right"; ctx.fillStyle = "#ff5a5a"; ctx.fillText("CPU", W - 24, 40);
+  ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.font = "bold 44px sans-serif";
+  ctx.fillText(`${game.score[0]} - ${game.score[1]}`, W / 2, 50);
+  ctx.font = "16px sans-serif"; ctx.fillStyle = "#c9b79c"; ctx.fillText(`先に${WIN}個`, W / 2, 76);
+  for (let s = 0; s < 2; s++) game.pocketed[s].forEach((n, i) => {
+    const x = s === 0 ? 34 + i * 30 : W - 34 - i * 30, y = 74;
+    ctx.fillStyle = n === 9 ? "#f6f6f2" : BCOL[n]; ctx.beginPath(); ctx.arc(x, y, 12, 0, 7); ctx.fill();
+    ctx.fillStyle = n === 8 || n === 4 || n === 7 || n === 2 ? "#fff" : "#111"; ctx.font = "bold 13px sans-serif"; ctx.fillText(n, x, y + 5);
+  });
+}
+function loop(t) {
+  const dt = Math.min(.05, (t - lastT) / 1000 || 0); lastT = t;
+  update(dt); render(); requestAnimationFrame(loop);
+}
+function fit() {
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  cv.style.width = W * s + "px"; cv.style.height = H * s + "px";
+}
+addEventListener("resize", fit); fit();
+document.getElementById("start").onclick = start;
+document.getElementById("again").onclick = start;
+document.getElementById("tomenu").onclick = () => {
+  document.getElementById("result").classList.add("hidden"); document.getElementById("menu").classList.remove("hidden"); game = null;
+};
+requestAnimationFrame(loop);
+window.__dbg = () => ({ game, balls, shoot });
+</script>
+</body>
+</html>
