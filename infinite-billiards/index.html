@@ -40,14 +40,14 @@ function resize(){
 addEventListener('resize', resize); resize();
 
 // ---------- ゲーム状態 ----------
-let state = 'title';        // title | aim | cpu | roll | banner | over
-let who = 0;                // 0=プレイヤー 1=CPU
+let state = 'title';        // title | aim | roll | banner | over
+let best = 0, newRecord = false;
+try{ best = +localStorage.getItem('ibBest')||0 }catch(e){}
 let round = 1;
-const scores = [0,0];
+let score = 0;
 let balls = [], cueBall = null, turnScore = 0, rollT = 0, timer = 0, bannerText = '';
 let pull = null;            // {dx,dy} 現在の引っ張りベクトル(キューボール基準)
 let drag = null;            // プレイヤーのドラッグ
-let cpuPlan = null;
 let fx = [];                // エフェクト
 const rnd = (a,b)=>a+Math.random()*(b-a);
 
@@ -69,22 +69,24 @@ function setupTable(){
 }
 
 function startGame(){
-  scores[0]=scores[1]=0; round=1; who=0; startTurn();
+  score=0; round=1; newRecord=false; startTurn();
 }
 function startTurn(){
-  setupTable(); pull = null; drag = null; cpuPlan = null;
-  if(who===0){ state='aim'; }
-  else { state='cpu'; timer = 0; planCPU(); }
+  setupTable(); pull = null; drag = null;
+  state='aim';
 }
 function endTurn(){
-  scores[who] += turnScore;
+  score += turnScore;
   bannerText = '+' + turnScore;
   state = 'banner'; timer = 1.6; pull = null;
 }
 function afterBanner(){
-  if(who===1){ round++; }
-  who ^= 1;
-  if(round > TURNS){ state='over'; return; }
+  round++;
+  if(round > TURNS){
+    state='over';
+    if(score>best){ best=score; newRecord=true; try{localStorage.setItem('ibBest',best)}catch(e){} }
+    return;
+  }
   startTurn();
 }
 
@@ -182,29 +184,6 @@ function allStopped(){
   return true;
 }
 
-// ---------- CPU ----------
-function planCPU(){
-  const targets = balls.filter(b=>b!==cueBall);
-  const c = cueBall;
-  let cands = [];
-  for(const o of targets){
-    for(const p of POCKETS){
-      let ux=p[0]-o.x, uy=p[1]-o.y; const ul=Math.hypot(ux,uy); ux/=ul; uy/=ul;
-      const gx=o.x-ux*BR*2, gy=o.y-uy*BR*2;
-      let cx=gx-c.x, cy=gy-c.y; const cl=Math.hypot(cx,cy); cx/=cl; cy/=cl;
-      const cosCut = cx*ux+cy*uy;
-      if(cosCut<0.25) continue;
-      cands.push({sc:cosCut*2 - cl/700 - ul/900, ang:Math.atan2(cy,cx)});
-    }
-  }
-  cands.sort((a,b)=>b.sc-a.sc);
-  let ang;
-  if(cands.length){ ang = cands[Math.floor(Math.random()*Math.min(3,cands.length))].ang; }
-  else { const o=targets[0]||c; ang=Math.atan2(o.y-c.y,o.x-c.x); }
-  ang += rnd(-0.05,0.05);
-  cpuPlan = {ang, power:rnd(0.75,1), t:0};
-}
-
 // ---------- 入力 ----------
 function pos(e){ return {x:(e.clientX-ox)/scale, y:(e.clientY-oy)/scale}; }
 cv.addEventListener('pointerdown', e=>{
@@ -239,16 +218,7 @@ cv.addEventListener('contextmenu', e=>e.preventDefault());
 function update(dt){
   for(const f of fx) f.t += dt;
   fx = fx.filter(f=>f.t<0.6);
-  if(state==='cpu'){
-    timer += dt;
-    if(timer>0.7){
-      cpuPlan.t += dt;
-      const k = Math.min(1, cpuPlan.t/0.9), e = k*k*(3-2*k);
-      const len = cpuPlan.power*MAXPULL*e;
-      pull = {dx:-Math.cos(cpuPlan.ang)*len, dy:-Math.sin(cpuPlan.ang)*len};
-      if(cpuPlan.t>1.1) shoot(Math.cos(cpuPlan.ang), Math.sin(cpuPlan.ang), cpuPlan.power);
-    }
-  } else if(state==='roll'){
+  if(state==='roll'){
     rollT += dt;
     step(dt);
     if((rollT>0.3 && allStopped()) || rollT>20) endTurn();
@@ -351,13 +321,10 @@ function drawHUD(){
   // 背景パネル
   const hudBg = ctx.createLinearGradient(0,0,0,100); hudBg.addColorStop(0,'#1b2347'); hudBg.addColorStop(1,'#0f1530');
   ctx.fillStyle=hudBg; ctx.fillRect(0,0,VW,100);
-  const act = state==='title'||state==='over' ? -1 : who;
-  // YOU
-  rrect(12,10,104,58,12); ctx.fillStyle = act===0 ? '#2a6df4' : '#1d2a52'; ctx.fill();
-  text('YOU',64,25,12,'#cfe0ff'); text(scores[0],64,50,26,'#fff');
-  // CPU
-  rrect(244,10,104,58,12); ctx.fillStyle = act===1 ? '#e8503a' : '#3a2230'; ctx.fill();
-  text('CPU',296,25,12,'#ffd5cc'); text(scores[1],296,50,26,'#fff');
+  rrect(12,10,104,58,12); ctx.fillStyle = '#2a6df4'; ctx.fill();
+  text('SCORE',64,25,12,'#cfe0ff'); text(score+(state==='roll'?turnScore:0),64,50,26,'#fff');
+  rrect(244,10,104,58,12); ctx.fillStyle = '#3a3320'; ctx.fill();
+  text('BEST',296,25,12,'#ffe7a0'); text(best,296,50,26,'#fff');
   // ターン
   text('TURN',180,20,11,'#8fa0d6');
   text(Math.min(round,TURNS)+' / '+TURNS,180,42,22,'#fff');
@@ -370,7 +337,6 @@ function drawHUD(){
 function drawMsg(){
   let msg = '';
   if(state==='aim') msg = '画面を引っ張って離す！（引いた逆方向へ発射）';
-  else if(state==='cpu') msg = 'CPUのターン…';
   else if(state==='roll') msg = '獲得 +' + turnScore;
   if(msg){
     text(msg,180,104,12,'#ffffff');
@@ -385,7 +351,7 @@ function drawTitle(){
   overlay(0.82);
   text('無限増殖',180,150,46,'#ffd86b','center','900');
   text('ビリヤード',180,202,40,'#fff','center','900');
-  const lines = ['玉がぶつかるたび倍々に増殖！（最大256個）','10ターンでポケットに多く入れた方が勝ち','画面を引っ張って離すと逆方向に発射','（モンスト風の引っ張りアクション）'];
+  const lines = ['玉がぶつかるたび倍々に増殖！（最大256個）','10ターンでポケットに入れた玉の合計を競う1人用','画面を引っ張って離すと逆方向に発射','（モンスト風の引っ張りアクション）'];
   lines.forEach((s,i)=>text(s,180,278+i*26,14,'#c8d2f5','center','500'));
   const pulse = 0.6+0.4*Math.sin(performance.now()/300);
   rrect(70,430,220,60,30); ctx.fillStyle=`rgba(42,109,244,${0.7+0.3*pulse})`; ctx.fill();
@@ -393,11 +359,11 @@ function drawTitle(){
 }
 function drawOver(){
   overlay(0.8);
-  const w = scores[0]>scores[1] ? 'YOU WIN!' : scores[0]<scores[1] ? 'YOU LOSE…' : 'DRAW';
-  const col = scores[0]>scores[1] ? '#ffd86b' : scores[0]<scores[1] ? '#ff7d6b' : '#fff';
-  text(w,180,190,48,col,'center','900');
-  text('YOU  '+scores[0],180,290,34,'#8fb4ff');
-  text('CPU  '+scores[1],180,340,34,'#ff9d8d');
+  text('FINISH!',180,170,48,'#ffd86b','center','900');
+  text('SCORE',180,250,16,'#c8d2f5','center','500');
+  text(score,180,300,64,'#fff','center','900');
+  if(newRecord) text('NEW RECORD!',180,360,24,'#ff9d8d');
+  else text('BEST  '+best,180,360,22,'#ffe7a0');
   text('タップでタイトルへ',180,450,18,'#c8d2f5','center','500');
 }
 function draw(){
@@ -410,7 +376,7 @@ function draw(){
   drawHUD();
   drawMsg();
   if(state==='banner'){
-    text(who===0?'あなた':'CPU',180,(T+B)/2-50,22,'#fff');
+    text('TURN '+round,180,(T+B)/2-50,22,'#fff');
     text(bannerText,180,(T+B)/2,80,'#ffd86b','center','900');
     text('個ゲット！',180,(T+B)/2+56,20,'#fff');
   }
