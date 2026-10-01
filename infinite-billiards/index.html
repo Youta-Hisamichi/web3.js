@@ -101,7 +101,7 @@ function endTurn(){
 function afterBanner(){
   round++;
   if(round > TURNS){
-    state='over';
+    state='over'; submitScore(score);
     if(score>best){ best=score; newRecord=true; try{localStorage.setItem('ibBest',best)}catch(e){} }
     return;
   }
@@ -201,6 +201,34 @@ function allStopped(){
   for(const b of balls) if(b.vx||b.vy) return false;
   return true;
 }
+
+// ---------- ランキング(共有DB) ----------
+let rankRows = [], myId = null, names = {}, rankDb = null;
+async function initRanking(){
+  try{
+    const db = await claude.use('db'), user = await claude.use('user');
+    if(!db || !user) return;
+    rankDb = db; myId = await user.id();
+    db.collection('ranking').orderBy('score','desc').limit(20).onSnapshot(async snap=>{
+      rankRows = snap.docs.map(d=>({id:d.id, score:+d.data().score||0}));
+      try{
+        const ps = await user.profiles(rankRows.map(r=>r.id));
+        for(const r of rankRows) names[r.id] = (ps[r.id] && ps[r.id].name) || '';
+      }catch(e){}
+      const mine = rankRows.find(r=>r.id===myId);
+      if(mine && mine.score>best) best = mine.score;
+    }, ()=>{});
+  }catch(e){}
+}
+async function submitScore(sc){
+  if(!rankDb || !myId || sc<=0) return;
+  try{
+    const ref = rankDb.collection('ranking').doc(myId);
+    const cur = await ref.get();
+    if(!cur.exists || (+cur.data().score||0) < sc) await ref.set({score:sc, ts:Date.now()});
+  }catch(e){}
+}
+initRanking();
 
 // ---------- 入力 ----------
 function pos(e){ return {x:(e.clientX-ox)/scale, y:(e.clientY-oy)/scale}; }
@@ -374,6 +402,18 @@ function drawTitle(){
   const pulse = 0.6+0.4*Math.sin(performance.now()/300);
   rrect(70,430,220,60,30); ctx.fillStyle=`rgba(42,109,244,${0.7+0.3*pulse})`; ctx.fill();
   text('タップでスタート',180,460,20,'#fff');
+  drawRanking(515,3);
+}
+function drawRanking(y, n){
+  text('🏆 RANKING',180,y,16,'#ffd86b');
+  if(!rankRows.length){ text(rankDb?'まだ記録がありません':'ランキングに接続できません',180,y+28,13,'#8fa0d6','center','500'); return; }
+  rankRows.slice(0,n).forEach((r,i)=>{
+    const yy = y+26+i*24, me = r.id===myId;
+    if(me){ rrect(40,yy-11,280,22,8); ctx.fillStyle='rgba(42,109,244,0.45)'; ctx.fill(); }
+    text((i+1)+'',58,yy,14,i<3?'#ffd86b':'#c8d2f5');
+    text(me?'あなた':(names[r.id]||'名無し'),84,yy,14,'#fff','left','600');
+    text(r.score,304,yy,15,'#fff','right');
+  });
 }
 function drawOver(){
   overlay(0.8);
@@ -382,7 +422,8 @@ function drawOver(){
   text(score,180,300,64,'#fff','center','900');
   if(newRecord) text('NEW RECORD!',180,360,24,'#ff9d8d');
   else text('BEST  '+best,180,360,22,'#ffe7a0');
-  text('タップでタイトルへ',180,450,18,'#c8d2f5','center','500');
+  drawRanking(405,5);
+  text('タップでタイトルへ',180,595,16,'#c8d2f5','center','500');
 }
 function draw(){
   ctx.setTransform(dpr*scale,0,0,dpr*scale,dpr*ox,dpr*oy);
