@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>無限増殖ビリヤード</title>
+<style>
+  html,body{margin:0;height:100%;background:#0b1020;overflow:hidden;touch-action:none;overscroll-behavior:none;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+  canvas{display:block;touch-action:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+// ---------- 定数 ----------
+const VW = 360, VH = 640;                    // 論理サイズ(縦画面)
+const L = 24, R = 336, T = 118, B = 612;     // テーブル内側
+const BR = 8;                                // 玉の半径
+const CAP = 256;                             // 玉の最大数
+const MAXGEN = 8;                            // 表示する数字の上限
+const TURNS = 10;
+const PR = 19;                               // ポケット半径
+const POCKETS = [[L-3,T-3],[R+3,T-3],[L-3,B+3],[R+3,B+3],[L-5,(T+B)/2],[R+5,(T+B)/2]];
+const MAXPULL = 110, MINPULL = 14;
+const FONT = "system-ui,-apple-system,'Hiragino Sans','Noto Sans JP',sans-serif";
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let scale = 1, ox = 0, oy = 0, dpr = 1;
+function resize(){
+  dpr = window.devicePixelRatio || 1;
+  const w = innerWidth, h = innerHeight;
+  cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr);
+  scale = Math.min(w/VW, h/VH);
+  ox = (w - VW*scale)/2; oy = (h - VH*scale)/2;
+}
+addEventListener('resize', resize); resize();
+
+// ---------- ゲーム状態 ----------
+let state = 'title';        // title | aim | cpu | roll | banner | over
+let who = 0;                // 0=プレイヤー 1=CPU
+let round = 1;
+const scores = [0,0];
+let balls = [], cueBall = null, turnScore = 0, rollT = 0, timer = 0, bannerText = '';
+let pull = null;            // {dx,dy} 現在の引っ張りベクトル(キューボール基準)
+let drag = null;            // プレイヤーのドラッグ
+let cpuPlan = null;
+let fx = [];                // エフェクト
+const rnd = (a,b)=>a+Math.random()*(b-a);
+
+function mkBall(x,y,white,g){
+  return {x,y,vx:0,vy:0,g:g||1,cd:0,white:!!white};
+}
+function setupTable(){
+  balls = []; fx = []; turnScore = 0;
+  const rows = [1,2,3];
+  const cx = (L+R)/2 + rnd(-30,30), top = T + 90 + rnd(-10,20);
+  for(let r=0;r<rows.length;r++){
+    for(let i=0;i<rows[r];i++){
+      const x = cx + (i-(rows[r]-1)/2)*(BR*2+3) + rnd(-2,2);
+      balls.push(mkBall(x, top + r*(BR*2), false, 1));
+    }
+  }
+  cueBall = mkBall((L+R)/2 + rnd(-60,60), B - 80, true, 1);
+  balls.push(cueBall);
+}
+
+function startGame(){
+  scores[0]=scores[1]=0; round=1; who=0; startTurn();
+}
+function startTurn(){
+  setupTable(); pull = null; drag = null; cpuPlan = null;
+  if(who===0){ state='aim'; }
+  else { state='cpu'; timer = 0; planCPU(); }
+}
+function endTurn(){
+  scores[who] += turnScore;
+  bannerText = '+' + turnScore;
+  state = 'banner'; timer = 1.6; pull = null;
+}
+function afterBanner(){
+  if(who===1){ round++; }
+  who ^= 1;
+  if(round > TURNS){ state='over'; return; }
+  startTurn();
+}
+
+// ---------- 発射 ----------
+function shoot(dirx, diry, power){
+  const sp = 260 + 760*power;
+  cueBall.vx = dirx*sp; cueBall.vy = diry*sp;
+  state = 'roll'; rollT = 0; pull = null;
+}
+
+// ---------- 物理 ----------
+function spawnClone(a, nx, ny){
+  const side = Math.random()<0.5 ? -1 : 1;
+  const ang = side*rnd(0.25,0.6), c=Math.cos(ang), s=Math.sin(ang);
+  const b = mkBall(a.x - ny*side*BR*1.5, a.y + nx*side*BR*1.5, a.white, a.g);
+  b.x = Math.min(R-BR, Math.max(L+BR, b.x)); b.y = Math.min(B-BR, Math.max(T+BR, b.y));
+  b.vx = a.vx*c - a.vy*s; b.vy = a.vx*s + a.vy*c;
+  b.cd = 0.15;
+  return b;
+}
+function step(dt){
+  const n = 3, h = dt/n;
+  for(let s=0;s<n;s++){
+    const pend = [];
+    for(const b of balls){
+      b.x += b.vx*h; b.y += b.vy*h; if(b.cd>0) b.cd -= h;
+    }
+    // ポケット
+    for(const b of balls){
+      if(b.dead) continue;
+      for(const p of POCKETS){
+        const dx=b.x-p[0], dy=b.y-p[1];
+        if(dx*dx+dy*dy < PR*PR){
+          b.dead = true; turnScore++;
+          fx.push({x:p[0],y:p[1],t:0}); if(navigator.vibrate) try{navigator.vibrate(8)}catch(e){}
+          break;
+        }
+      }
+    }
+    // 壁
+    for(const b of balls){
+      if(b.dead) continue;
+      if(b.x < L+BR){ b.x=L+BR; b.vx=Math.abs(b.vx)*0.92; }
+      else if(b.x > R-BR){ b.x=R-BR; b.vx=-Math.abs(b.vx)*0.92; }
+      if(b.y < T+BR){ b.y=T+BR; b.vy=Math.abs(b.vy)*0.92; }
+      else if(b.y > B-BR){ b.y=B-BR; b.vy=-Math.abs(b.vy)*0.92; }
+    }
+    // 玉同士
+    const N = balls.length, D = BR*2, D2 = D*D;
+    for(let i=0;i<N;i++){
+      const a = balls[i]; if(a.dead) continue;
+      for(let j=i+1;j<N;j++){
+        const b = balls[j]; if(b.dead) continue;
+        const dx=b.x-a.x, dy=b.y-a.y, d2=dx*dx+dy*dy;
+        if(d2>=D2 || d2===0) continue;
+        const d=Math.sqrt(d2), nx=dx/d, ny=dy/d, ov=(D-d)/2;
+        a.x-=nx*ov; a.y-=ny*ov; b.x+=nx*ov; b.y+=ny*ov;
+        const rv = (b.vx-a.vx)*nx + (b.vy-a.vy)*ny;
+        if(rv<0){
+          const imp = -(1+0.96)*rv/2;
+          a.vx-=imp*nx; a.vy-=imp*ny; b.vx+=imp*nx; b.vy+=imp*ny;
+          if(-rv>35 && a.cd<=0 && b.cd<=0) pend.push(a,b,nx,ny);
+        }
+      }
+    }
+    // 倍増
+    for(let k=0;k<pend.length;k+=4){
+      const a=pend[k], b=pend[k+1], nx=pend[k+2], ny=pend[k+3];
+      if(a.cd>0 || b.cd>0) continue;
+      let live = 0; for(const q of balls) if(!q.dead) live++;
+      if(live >= CAP) break;
+      const add = [];
+      add.push(spawnClone(a,nx,ny));
+      if(live+1 < CAP) add.push(spawnClone(b,-nx,-ny));
+      if(a.g<MAXGEN){ a.g++; } if(b.g<MAXGEN){ b.g++; }
+      for(const c of add){ c.g=(c===add[0]?a:b).g; balls.push(c); }
+      a.cd = b.cd = 0.15;
+      fx.push({x:(a.x+b.x)/2,y:(a.y+b.y)/2,t:0,s:1});
+    }
+  }
+  // 摩擦
+  const drag_ = Math.exp(-(0.7 + (rollT>9?1.5:0))*dt);
+  for(const b of balls){
+    if(b.dead) continue;
+    let sp = Math.hypot(b.vx,b.vy);
+    if(sp>0){
+      const ns = sp*drag_ - 30*dt;
+      if(ns<6){ b.vx=b.vy=0; } else { b.vx*=ns/sp; b.vy*=ns/sp; }
+    }
+  }
+  balls = balls.filter(b=>!b.dead);
+}
+function allStopped(){
+  for(const b of balls) if(b.vx||b.vy) return false;
+  return true;
+}
+
+// ---------- CPU ----------
+function planCPU(){
+  const targets = balls.filter(b=>b!==cueBall);
+  const c = cueBall;
+  let cands = [];
+  for(const o of targets){
+    for(const p of POCKETS){
+      let ux=p[0]-o.x, uy=p[1]-o.y; const ul=Math.hypot(ux,uy); ux/=ul; uy/=ul;
+      const gx=o.x-ux*BR*2, gy=o.y-uy*BR*2;
+      let cx=gx-c.x, cy=gy-c.y; const cl=Math.hypot(cx,cy); cx/=cl; cy/=cl;
+      const cosCut = cx*ux+cy*uy;
+      if(cosCut<0.25) continue;
+      cands.push({sc:cosCut*2 - cl/700 - ul/900, ang:Math.atan2(cy,cx)});
+    }
+  }
+  cands.sort((a,b)=>b.sc-a.sc);
+  let ang;
+  if(cands.length){ ang = cands[Math.floor(Math.random()*Math.min(3,cands.length))].ang; }
+  else { const o=targets[0]||c; ang=Math.atan2(o.y-c.y,o.x-c.x); }
+  ang += rnd(-0.05,0.05);
+  cpuPlan = {ang, power:rnd(0.75,1), t:0};
+}
+
+// ---------- 入力 ----------
+function pos(e){ return {x:(e.clientX-ox)/scale, y:(e.clientY-oy)/scale}; }
+cv.addEventListener('pointerdown', e=>{
+  e.preventDefault();
+  if(state==='title'){ startGame(); return; }
+  if(state==='over'){ state='title'; return; }
+  if(state==='aim'){
+    const p = pos(e); drag = {sx:p.x, sy:p.y}; pull = {dx:0,dy:0};
+    try{cv.setPointerCapture(e.pointerId)}catch(_){}
+  }
+});
+cv.addEventListener('pointermove', e=>{
+  if(!drag) return; e.preventDefault();
+  const p = pos(e); let dx=p.x-drag.sx, dy=p.y-drag.sy;
+  const l=Math.hypot(dx,dy);
+  if(l>MAXPULL){ dx*=MAXPULL/l; dy*=MAXPULL/l; }
+  pull = {dx,dy};
+});
+function release(cancel){
+  if(!drag) return;
+  const l = pull ? Math.hypot(pull.dx,pull.dy) : 0;
+  drag = null;
+  if(!cancel && l>=MINPULL && state==='aim'){
+    shoot(-pull.dx/l, -pull.dy/l, l/MAXPULL);
+  } else pull = null;
+}
+cv.addEventListener('pointerup', e=>release(false));
+cv.addEventListener('pointercancel', e=>release(true));
+cv.addEventListener('contextmenu', e=>e.preventDefault());
+
+// ---------- 更新 ----------
+function update(dt){
+  for(const f of fx) f.t += dt;
+  fx = fx.filter(f=>f.t<0.6);
+  if(state==='cpu'){
+    timer += dt;
+    if(timer>0.7){
+      cpuPlan.t += dt;
+      const k = Math.min(1, cpuPlan.t/0.9), e = k*k*(3-2*k);
+      const len = cpuPlan.power*MAXPULL*e;
+      pull = {dx:-Math.cos(cpuPlan.ang)*len, dy:-Math.sin(cpuPlan.ang)*len};
+      if(cpuPlan.t>1.1) shoot(Math.cos(cpuPlan.ang), Math.sin(cpuPlan.ang), cpuPlan.power);
+    }
+  } else if(state==='roll'){
+    rollT += dt;
+    step(dt);
+    if((rollT>0.3 && allStopped()) || rollT>20) endTurn();
+  } else if(state==='banner'){
+    timer -= dt; if(timer<=0) afterBanner();
+  }
+}
+
+// ---------- 描画 ----------
+function ballColor(b){
+  return b.white ? '#f4f4f4' : `hsl(${(b.g*47+200)%360},75%,56%)`;
+}
+function rayCast(c, dx, dy){
+  let t = 1e9;
+  if(dx>0) t=Math.min(t,(R-BR-c.x)/dx); else if(dx<0) t=Math.min(t,(L+BR-c.x)/dx);
+  if(dy>0) t=Math.min(t,(B-BR-c.y)/dy); else if(dy<0) t=Math.min(t,(T+BR-c.y)/dy);
+  let hit = false;
+  for(const b of balls){
+    if(b===c) continue;
+    const px=b.x-c.x, py=b.y-c.y, pr=px*dx+py*dy;
+    if(pr<=0) continue;
+    const perp2 = px*px+py*py-pr*pr, D=BR*2;
+    if(perp2>=D*D) continue;
+    const tt = pr - Math.sqrt(D*D-perp2);
+    if(tt<t){ t=tt; hit=true; }
+  }
+  return {t:Math.max(0,t), hit};
+}
+function rrect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function text(s,x,y,size,color,align,weight){
+  ctx.font = `${weight||'700'} ${size}px ${FONT}`; ctx.fillStyle=color; ctx.textAlign=align||'center'; ctx.textBaseline='middle';
+  ctx.fillText(s,x,y);
+}
+
+function drawTable(){
+  // レール
+  rrect(L-16,T-16,R-L+32,B-T+32,22);
+  const g = ctx.createLinearGradient(0,T,0,B); g.addColorStop(0,'#7a4a24'); g.addColorStop(1,'#4d2c14');
+  ctx.fillStyle = g; ctx.fill();
+  // フェルト
+  ctx.fillStyle = '#146b3a'; ctx.fillRect(L,T,R-L,B-T);
+  const fg = ctx.createRadialGradient((L+R)/2,(T+B)/2,40,(L+R)/2,(T+B)/2,360);
+  fg.addColorStop(0,'rgba(255,255,255,0.10)'); fg.addColorStop(1,'rgba(0,0,0,0.25)');
+  ctx.fillStyle=fg; ctx.fillRect(L,T,R-L,B-T);
+  ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(L,B-150); ctx.lineTo(R,B-150); ctx.stroke();
+  // ポケット
+  ctx.fillStyle='#05070a';
+  for(const p of POCKETS){ ctx.beginPath(); ctx.arc(p[0],p[1],PR,0,7); ctx.fill(); }
+}
+function drawBalls(dim){
+  ctx.globalAlpha = dim ? 0.45 : 1;
+  const fs = Math.round(BR*1.15);
+  ctx.font = `800 ${fs}px ${FONT}`; ctx.textAlign='center'; ctx.textBaseline='middle';
+  for(const b of balls){
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath(); ctx.arc(b.x+1.5,b.y+2,BR,0,7); ctx.fill();
+    ctx.fillStyle = ballColor(b);
+    ctx.beginPath(); ctx.arc(b.x,b.y,BR,0,7); ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.45)';
+    ctx.beginPath(); ctx.arc(b.x-BR*0.32,b.y-BR*0.34,BR*0.28,0,7); ctx.fill();
+    ctx.fillStyle = b.white ? '#222' : '#fff';
+    ctx.fillText(b.g, b.x, b.y+0.5);
+  }
+  ctx.globalAlpha = 1;
+}
+function drawAim(){
+  if(!pull || !cueBall) return;
+  const l = Math.hypot(pull.dx,pull.dy); if(l<2) return;
+  const c = cueBall, pw = l/MAXPULL;
+  const dirx=-pull.dx/l, diry=-pull.dy/l;
+  // 引っ張りゴム
+  ctx.lineCap='round';
+  ctx.strokeStyle = `hsl(${120-pw*120},90%,60%)`; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(c.x,c.y); ctx.lineTo(c.x+pull.dx,c.y+pull.dy); ctx.stroke();
+  ctx.beginPath(); ctx.arc(c.x+pull.dx,c.y+pull.dy,6,0,7); ctx.fillStyle=ctx.strokeStyle; ctx.fill();
+  ctx.beginPath(); ctx.arc(c.x,c.y,BR+4,0,7); ctx.lineWidth=2; ctx.stroke();
+  if(l < MINPULL){ return; }
+  // 予測線
+  const r = rayCast(c,dirx,diry);
+  ctx.setLineDash([7,6]); ctx.strokeStyle='rgba(255,255,255,0.85)'; ctx.lineWidth=2.5;
+  ctx.beginPath(); ctx.moveTo(c.x,c.y); ctx.lineTo(c.x+dirx*r.t,c.y+diry*r.t); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.arc(c.x+dirx*r.t,c.y+diry*r.t,BR,0,7);
+  ctx.strokeStyle = r.hit ? 'rgba(255,230,90,0.95)' : 'rgba(255,255,255,0.6)'; ctx.lineWidth=2; ctx.stroke();
+  // 矢印
+  const ax=c.x+dirx*(BR+10+pw*28), ay=c.y+diry*(BR+10+pw*28);
+  ctx.fillStyle='#fff'; ctx.beginPath();
+  ctx.moveTo(ax+dirx*10,ay+diry*10); ctx.lineTo(ax-diry*7,ay+dirx*7); ctx.lineTo(ax+diry*7,ay-dirx*7); ctx.closePath(); ctx.fill();
+}
+function drawFx(){
+  for(const f of fx){
+    const k=f.t/0.6;
+    ctx.strokeStyle = f.s ? `rgba(255,255,255,${0.6*(1-k)})` : `rgba(255,220,80,${1-k})`;
+    ctx.lineWidth = 3*(1-k)+0.5;
+    ctx.beginPath(); ctx.arc(f.x,f.y,(f.s?6:PR)+k*(f.s?16:26),0,7); ctx.stroke();
+  }
+}
+function drawHUD(){
+  // 背景パネル
+  const hudBg = ctx.createLinearGradient(0,0,0,100); hudBg.addColorStop(0,'#1b2347'); hudBg.addColorStop(1,'#0f1530');
+  ctx.fillStyle=hudBg; ctx.fillRect(0,0,VW,100);
+  const act = state==='title'||state==='over' ? -1 : who;
+  // YOU
+  rrect(12,10,104,58,12); ctx.fillStyle = act===0 ? '#2a6df4' : '#1d2a52'; ctx.fill();
+  text('YOU',64,25,12,'#cfe0ff'); text(scores[0],64,50,26,'#fff');
+  // CPU
+  rrect(244,10,104,58,12); ctx.fillStyle = act===1 ? '#e8503a' : '#3a2230'; ctx.fill();
+  text('CPU',296,25,12,'#ffd5cc'); text(scores[1],296,50,26,'#fff');
+  // ターン
+  text('TURN',180,20,11,'#8fa0d6');
+  text(Math.min(round,TURNS)+' / '+TURNS,180,42,22,'#fff');
+  // 現在ターンの獲得 & 玉数
+  const live = balls.length;
+  text('玉 '+live+' / '+CAP,180,64,12,'#ffd86b');
+  rrect(40,78,280,9,4.5); ctx.fillStyle='rgba(255,255,255,0.12)'; ctx.fill();
+  if(live>0){ rrect(40,78,Math.max(9,280*live/CAP),9,4.5); ctx.fillStyle='#ffd86b'; ctx.fill(); }
+}
+function drawMsg(){
+  let msg = '';
+  if(state==='aim') msg = '画面を引っ張って離す！（引いた逆方向へ発射）';
+  else if(state==='cpu') msg = 'CPUのターン…';
+  else if(state==='roll') msg = '獲得 +' + turnScore;
+  if(msg){
+    text(msg,180,104,12,'#ffffff');
+  }
+  if(state==='roll' && turnScore>0){
+    // 獲得数を大きく
+    text('+'+turnScore, 180, (T+B)/2, 64, 'rgba(255,255,255,0.18)', 'center', '900');
+  }
+}
+function overlay(a){ ctx.fillStyle=`rgba(5,8,20,${a})`; ctx.fillRect(0,0,VW,VH); }
+function drawTitle(){
+  overlay(0.82);
+  text('無限増殖',180,150,46,'#ffd86b','center','900');
+  text('ビリヤード',180,202,40,'#fff','center','900');
+  const lines = ['玉がぶつかるたび倍々に増殖！（最大256個）','10ターンでポケットに多く入れた方が勝ち','画面を引っ張って離すと逆方向に発射','（モンスト風の引っ張りアクション）'];
+  lines.forEach((s,i)=>text(s,180,278+i*26,14,'#c8d2f5','center','500'));
+  const pulse = 0.6+0.4*Math.sin(performance.now()/300);
+  rrect(70,430,220,60,30); ctx.fillStyle=`rgba(42,109,244,${0.7+0.3*pulse})`; ctx.fill();
+  text('タップでスタート',180,460,20,'#fff');
+}
+function drawOver(){
+  overlay(0.8);
+  const w = scores[0]>scores[1] ? 'YOU WIN!' : scores[0]<scores[1] ? 'YOU LOSE…' : 'DRAW';
+  const col = scores[0]>scores[1] ? '#ffd86b' : scores[0]<scores[1] ? '#ff7d6b' : '#fff';
+  text(w,180,190,48,col,'center','900');
+  text('YOU  '+scores[0],180,290,34,'#8fb4ff');
+  text('CPU  '+scores[1],180,340,34,'#ff9d8d');
+  text('タップでタイトルへ',180,450,18,'#c8d2f5','center','500');
+}
+function draw(){
+  ctx.setTransform(dpr*scale,0,0,dpr*scale,dpr*ox,dpr*oy);
+  ctx.fillStyle='#0b1020'; ctx.fillRect(-ox/scale,-oy/scale,innerWidth/scale,innerHeight/scale);
+  drawTable();
+  drawBalls(state==='banner');
+  drawAim();
+  drawFx();
+  drawHUD();
+  drawMsg();
+  if(state==='banner'){
+    text(who===0?'あなた':'CPU',180,(T+B)/2-50,22,'#fff');
+    text(bannerText,180,(T+B)/2,80,'#ffd86b','center','900');
+    text('個ゲット！',180,(T+B)/2+56,20,'#fff');
+  }
+  if(state==='title') drawTitle();
+  if(state==='over') drawOver();
+}
+
+// ---------- ループ ----------
+let last = performance.now(), acc = 0;
+function frame(now){
+  acc += Math.min(0.1,(now-last)/1000); last = now;
+  const DT = 1/60;
+  while(acc>=DT){ update(DT); acc-=DT; }
+  draw();
+  requestAnimationFrame(frame);
+}
+setupTable();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
